@@ -36,17 +36,41 @@ See [Adding a device](#adding-a-device).
 
 ## Install and run
 
-You need Windows 10 or 11 and the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
+You need Windows 10 or 11; the steps below install everything else. Run the commands in **PowerShell**: press **Start**, type `PowerShell` and press Enter.
+
+### 1. Install the tools
+
+```powershell
+winget install --id Microsoft.DotNet.SDK.10 -e --source winget
+winget install --id Git.Git -e --source winget
+```
+
+The first line installs the .NET 10 SDK, which builds the app. The second installs Git; skip it if you'll download the code as a ZIP instead.
+
+When they finish, **close PowerShell and open a new window**, so it finds `dotnet` and `git`.
+
+If PowerShell says `winget` isn't recognised, install *App Installer* from the Microsoft Store and try again. You can also download the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) and [Git](https://git-scm.com/download/win) installers yourself.
+
+### 2. Get the code
 
 ```powershell
 git clone https://github.com/En1gM-a/WirelessTaskBar.git
 cd WirelessTaskBar
+```
+
+Without Git: on this repo's GitHub page click **Code → Download ZIP** and extract it. Then, in PowerShell, `cd` into the extracted `WirelessTaskBar-main` folder.
+
+### 3. Build and run
+
+```powershell
 dotnet build -c Release
 .\bin\Release\net10.0-windows\WirelessTaskBar.exe
 ```
 
+Your devices' icons appear on the taskbar within a few seconds.
+
 - **Start with Windows:** press **Win + R**, type `shell:startup`, press Enter, and put a shortcut to `WirelessTaskBar.exe` in the folder that opens. Delete the shortcut to stop it.
-- **Rebuilding:** exit the app first. The running `.exe` locks the build output.
+- **Updating:** exit the app (right-click an icon → **Exit**). Run `git pull` in the folder, or download the ZIP again, then repeat step 3. The app must be closed, because the running `.exe` locks the build output.
 
 ## Device not showing?
 
