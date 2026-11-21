@@ -1,26 +1,42 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 
-// WirelessTaskBar: one tray icon per wireless device, showing its battery %.
+// WirelessTaskBar: one tray icon per wireless device: its shape (mouse, keyboard, headset) with a battery bar.
 // Sources: (1) the battery level Windows itself keeps for Bluetooth devices, headsets included (same number as Settings > Bluetooth & devices),
-//          (2) the Attack Shark 2.4G receiver's vendor HID channel.
-// shortcut: other 2.4G brands (Logitech HID++, Razer, SteelSeries, ...) each use a private protocol; add one reader per brand once a device is there to test with.
+//          (2) the Attack Shark 2.4G receiver's vendor HID channel, (3) the Aula 2.4G receiver (Aula.cs),
+//          (4) Logitech HID++ (Logitech.cs), Razer (Razer.cs) and the standard HID battery usage (GenericHid.cs).
+// shortcut: SteelSeries, Corsair, HyperX and others use a private protocol per model; add a reader once a device is there to test with.
 // shortcut: the Bluetooth path was written on a PC without Bluetooth; check names and the connected flag on a real headset.
-static class Program
+static partial class Program
 {
-    record Reading(string Name, int Percent, bool Charging, DateTime Seen);
-    record Node(string Container, string Name, bool IsBluetooth, bool Disconnected, int Battery); // one Windows device node
+    record Reading(string Name, string Kind, int Percent, bool Charging, DateTime Seen, TimeSpan Fresh); // Fresh: how long it counts as current
+    record Node(string Container, string Name, Guid Class, bool Disconnected, int Battery); // one Windows device node
 
     static readonly Dictionary<string, Reading> Readings = new(); // written by the reader thread and the poll; lock before use
     static readonly Dictionary<string, (NotifyIcon Icon, string Shown)> Icons = new();
+
+    static void Report(string key, string name, string kind, int percent, bool charging, TimeSpan fresh)
+    {
+        lock (Readings) Readings[key] = new(name, kind, percent, charging, DateTime.Now, fresh);
+    }
+
+    static void Forget(string key) { lock (Readings) Readings.Remove(key); }
 
     static readonly DevPropKey BatteryKey = new(new("104EA319-6EE2-4701-BD47-8DDBF425BBE5"), 2);   // byte, 0-100
     static readonly DevPropKey ContainerKey = new(new("8C7ED206-3F8A-4827-B3AB-AE9E1FAEFC6C"), 2); // DEVPKEY_Device_ContainerId
     static readonly DevPropKey NameKey = new(new("B725F130-47EF-101A-A5F1-02608C9EEBAC"), 10);     // DEVPKEY_NAME
     static readonly DevPropKey ClassKey = new(new("A45C254E-DF1C-4EFD-8020-67D146A850E0"), 10);    // DEVPKEY_Device_ClassGuid
     static readonly DevPropKey ConnectedKey = new(new("83DA6326-97A6-4088-9453-A1923F573B29"), 15); // bool, false = disconnected (community-documented, nikvoronin/WmiPnp)
-    static readonly Guid BluetoothClass = new("E0CBF06C-CD8B-4647-BB8A-263B43F0F974");
+    static readonly Guid BluetoothClass = new("E0CBF06C-CD8B-4647-BB8A-263B43F0F974"), AudioClass = new("C166523C-FE0C-4A94-A586-F1A80CFBBF3E"),
+        MediaClass = new("4D36E96C-E325-11CE-BFC1-08002BE10318"), MouseClass = new("4D36E96F-E325-11CE-BFC1-08002BE10318"),
+        KeyboardClass = new("4D36E96B-E325-11CE-BFC1-08002BE10318");
+
+    // What a Bluetooth device is, from the classes of its nodes, checked in this order (mice often add a keyboard node for their buttons).
+    static readonly (Guid Class, string Kind)[] Kinds = [(AudioClass, "headset"), (MediaClass, "headset"), (MouseClass, "mouse"), (KeyboardClass, "keyboard")];
+    static readonly Dictionary<string, string> Glyphs = new() { ["device"] = "\uE772", ["mouse"] = "\uE962", ["keyboard"] = "\uE765", ["headset"] = "\uE95B", ["bluetooth"] = "\uE702" };
+    static readonly string IconFont = FontFamily.Families.Any(f => f.Name == "Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets"; // Windows 11 : 10
 
     [STAThread]
     static int Main(string[] args)
@@ -28,6 +44,10 @@ static class Program
         if (args.Contains("--selftest")) return SelfTest();
         ApplicationConfiguration.Initialize();
         new Thread(ReadAttackShark) { IsBackground = true }.Start();
+        new Thread(ReadAula) { IsBackground = true }.Start();
+        new Thread(ReadLogitech) { IsBackground = true }.Start();
+        new Thread(ReadRazer) { IsBackground = true }.Start();
+        new Thread(ReadGenericHid) { IsBackground = true }.Start();
         var menu = new ContextMenuStrip();
         menu.Items.Add("Exit", null, (_, _) => Application.Exit());
         var ticks = 0;
@@ -39,54 +59,78 @@ static class Program
         return 0;
     }
 
-    // Make the tray match Readings: one icon per device, redrawn only when its text changes.
+    // Make the tray match Readings: one icon per device, redrawn only when what it shows or the taskbar theme changes.
     static void Sync(ContextMenuStrip menu)
     {
         Dictionary<string, Reading> now;
         lock (Readings) now = new(Readings);
+        var light = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "SystemUsesLightTheme", 0) is 1;
         var want = now.ToDictionary(kv => kv.Key, kv => Describe(kv.Value));
-        if (want.Count == 0) want["none"] = ("–", "WirelessTaskBar: no device is reporting battery", Color.Gray); // keeps Exit reachable
+        if (want.Count == 0) want["none"] = ("bluetooth", -1, Color.Gray, "WirelessTaskBar: no device is reporting battery"); // keeps Exit reachable
         foreach (var key in Icons.Keys.Except(want.Keys).ToList())
         {
             Native.DestroyIcon(Icons[key].Icon.Icon!.Handle);
             Icons[key].Icon.Dispose();
             Icons.Remove(key);
         }
-        foreach (var (key, (label, tip, color)) in want)
+        foreach (var (key, (kind, percent, bar, tip)) in want)
         {
+            var look = $"{kind} {percent} {bar.Name} {light} {tip}";
             Icons.TryGetValue(key, out var shown);
-            if (shown.Shown == label + tip) continue;
+            if (shown.Shown == look) continue;
             var icon = shown.Icon ?? new NotifyIcon { ContextMenuStrip = menu };
-            Draw(icon, label, color);
+            Draw(icon, Glyphs[kind], percent, bar, light);
             icon.Text = tip.Length > 127 ? tip[..127] : tip; // shell limit
             icon.Visible = true;
-            Icons[key] = (icon, label + tip);
+            Icons[key] = (icon, look);
         }
+        PinToTaskbar();
     }
 
-    static (string Label, string Tip, Color Color) Describe(Reading r) =>
-        DateTime.Now - r.Seen > TimeSpan.FromSeconds(60)
-            ? ("zz", $"{r.Name}: asleep (last {r.Percent}%)", Color.Gray)
-            : (r.Percent.ToString(), $"{r.Name}: {r.Percent}%" + (r.Charging ? ", charging" : ""),
-               r.Charging ? Color.RoyalBlue : r.Percent <= 20 ? Color.Firebrick : Color.ForestGreen);
+    // Bar: red at 20 % or less, blue while charging; the whole icon turns gray once the reading is older than its Fresh time.
+    static (string Kind, int Percent, Color Bar, string Tip) Describe(Reading r) =>
+        DateTime.Now - r.Seen > r.Fresh
+            ? (r.Kind, r.Percent, Color.Gray, $"{r.Name}: asleep (last {r.Percent}%)")
+            : (r.Kind, r.Percent, r.Charging ? Color.DodgerBlue : r.Percent <= 20 ? Color.Red : Color.LimeGreen,
+               $"{r.Name}: {r.Percent}%" + (r.Charging ? ", charging" : ""));
 
-    // Battery % as white text on a colored square, sized for the current DPI.
-    static void Draw(NotifyIcon icon, string label, Color background)
+    // The device's glyph in the taskbar's text color, with a battery bar along the bottom (none when percent < 0). Sized for the current DPI.
+    static void Draw(NotifyIcon icon, string glyph, int percent, Color bar, bool light)
     {
         var s = SystemInformation.SmallIconSize.Width;
+        var h = Math.Max(2, s / 8);
         using var bmp = new Bitmap(s, s);
         using (var g = Graphics.FromImage(bmp))
-        using (var brush = new SolidBrush(background))
-        using (var font = new Font("Segoe UI", s * (label.Length > 2 ? 0.5f : 0.72f), FontStyle.Bold, GraphicsUnit.Pixel))
-        using (var center = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+        using (var font = new Font(IconFont, s - h, GraphicsUnit.Pixel)) // 14 px at 100 % keeps the glyph's 1 px strokes crisp
+        using (var ink = new SolidBrush(bar == Color.Gray ? Color.Gray : light ? Color.Black : Color.White))
+        using (var track = new SolidBrush(Color.FromArgb(120, Color.Gray)))
+        using (var fill = new SolidBrush(bar))
+        using (var center = new StringFormat(StringFormatFlags.NoClip) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
         {
-            g.FillRectangle(brush, 0, 0, s, s);
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-            g.DrawString(label, font, Brushes.White, new RectangleF(0, 0, s, s), center);
+            g.DrawString(glyph, font, ink, new RectangleF(0, 0, s, s - h), center);
+            if (percent >= 0)
+            {
+                g.FillRectangle(track, 0, s - h, s, h);
+                g.FillRectangle(fill, 0, s - h, Math.Max(1, s * percent / 100), h);
+            }
         }
         var old = icon.Icon;
         icon.Icon = Icon.FromHandle(bmp.GetHicon());
         if (old != null) Native.DestroyIcon(old.Handle); // FromHandle icons never free their HICON
+    }
+
+    // Windows 11 tucks new tray icons behind the ^ arrow. Flip ours to "show on taskbar": the same switch as
+    // Settings > Personalization > Taskbar > Other system tray icons. Windows 10 has no such key, so this does nothing there.
+    static void PinToTaskbar()
+    {
+        using var root = Registry.CurrentUser.OpenSubKey(@"Control Panel\NotifyIconSettings");
+        foreach (var name in root?.GetSubKeyNames() ?? [])
+        {
+            using var key = root!.OpenSubKey(name);
+            if (key?.GetValue("ExecutablePath") is string path && path.EndsWith(@"\WirelessTaskBar.exe", StringComparison.OrdinalIgnoreCase) && key.GetValue("IsPromoted") is not 1)
+                using (var w = root.OpenSubKey(name, writable: true)) w?.SetValue("IsPromoted", 1, RegistryValueKind.DWord);
+        }
     }
 
     // Attack Shark receiver (USB 1D57:FA60) pushes "03 xx 40 <state> <level>" on interface 2 every ~2 s. We only listen, never write.
@@ -98,14 +142,14 @@ static class Program
             foreach (var path in Native.HidPaths().Where(p => p.Contains("vid_1d57&pid_fa60&mi_02", StringComparison.OrdinalIgnoreCase)))
             {
                 using var h = Native.CreateFile(path, 0x80000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero); // GENERIC_READ, shared, OPEN_EXISTING
-                var len = h.IsInvalid ? 0 : Native.InputLength(h);
+                var len = h.IsInvalid ? 0 : Native.Caps(h).InputReportByteLength;
                 if (len < 5) continue;
                 var buf = new byte[len];
                 while (Native.ReadFile(h, buf, len, out var n, IntPtr.Zero)) // blocks until the next report, fails once unplugged
                     if (ParseShark(buf, n) is (int percent, bool charging))
-                        lock (Readings) Readings["shark"] = new("Attack Shark mouse (2.4G)", percent, charging, DateTime.Now);
+                        Report("shark", "Attack Shark mouse (2.4G)", "mouse", percent, charging, TimeSpan.FromSeconds(60)); // reports every ~2 s while awake
             }
-            lock (Readings) Readings.Remove("shark");
+            Forget("shark");
             Thread.Sleep(5000);
         }
     }
@@ -121,11 +165,11 @@ static class Program
         {
             if (Native.CM_Locate_DevNode(out var dev, id, 0) != 0) continue;
             var battery = Native.Prop(dev, BatteryKey) is [var b] && b <= 100 ? b : -1;
-            var isBluetooth = Native.Prop(dev, ClassKey) is { Length: 16 } g && new Guid(g) == BluetoothClass;
-            if (battery < 0 && !isBluetooth) continue;
+            var cls = Native.Prop(dev, ClassKey) is { Length: 16 } g ? new Guid(g) : Guid.Empty;
+            if (battery < 0 && cls != BluetoothClass && !Kinds.Any(k => k.Class == cls)) continue;
             var container = Native.Prop(dev, ContainerKey) is { Length: 16 } c ? new Guid(c).ToString() : id;
             var name = Native.Prop(dev, NameKey) is { } n ? Encoding.Unicode.GetString(n).TrimEnd('\0') : id;
-            nodes.Add(new(container, name, isBluetooth, Native.Prop(dev, ConnectedKey) is [0], battery));
+            nodes.Add(new(container, name, cls, Native.Prop(dev, ConnectedKey) is [0], battery));
         }
         var found = PickBluetooth(nodes, DateTime.Now);
         lock (Readings)
@@ -136,28 +180,52 @@ static class Program
     }
 
     // A device has several nodes in one container (a headset: audio, hands-free, remote control...). Keep one reading per container,
-    // named after its Bluetooth node rather than e.g. "... Hands-Free AG", and drop devices Windows marks as disconnected
-    // so a switched-off headset doesn't keep showing its last %.
+    // named after its Bluetooth node rather than e.g. "... Hands-Free AG", typed by its other nodes, and drop devices Windows marks
+    // as disconnected so a switched-off headset doesn't keep showing its last %.
     static Dictionary<string, Reading> PickBluetooth(List<Node> nodes, DateTime now)
     {
-        var bt = nodes.Where(n => n.IsBluetooth).DistinctBy(n => n.Container).ToDictionary(n => n.Container);
+        var bt = nodes.Where(n => n.Class == BluetoothClass).DistinctBy(n => n.Container).ToDictionary(n => n.Container);
         return nodes.Where(n => n.Battery >= 0).DistinctBy(n => n.Container)
             .Where(n => !(bt.GetValueOrDefault(n.Container)?.Disconnected ?? n.Disconnected))
-            .ToDictionary(n => "win:" + n.Container, n => new Reading(bt.GetValueOrDefault(n.Container)?.Name ?? n.Name, n.Battery, false, now));
+            .ToDictionary(n => "win:" + n.Container, n => new Reading(
+                bt.GetValueOrDefault(n.Container)?.Name ?? n.Name,
+                Kinds.FirstOrDefault(k => nodes.Any(x => x.Container == n.Container && x.Class == k.Class)).Kind ?? "bluetooth",
+                n.Battery, false, now, TimeSpan.FromMinutes(2)));
     }
 
-    // "WirelessTaskBar.exe --selftest" exits 0 when the Attack Shark parser and the Bluetooth device picking pass these cases.
+    // "WirelessTaskBar.exe --selftest" exits 0 when every reader's parsing and the Bluetooth device picking pass these cases.
     static int SelfTest()
     {
-        List<Node> headset = [new("c1", "WH-1000XM4", true, false, -1), new("c1", "WH-1000XM4 Hands-Free AG", false, false, 80), new("c1", "WH-1000XM4 Avrcp", false, false, 80)];
-        List<Node> headsetOff = [new("c1", "WH-1000XM4", true, true, -1), new("c1", "WH-1000XM4 Hands-Free AG", false, false, 80)];
+        List<Node> headset = [new("c1", "WH-1000XM4", BluetoothClass, false, -1), new("c1", "WH-1000XM4 Hands-Free AG", MediaClass, false, 80), new("c1", "Headphones", AudioClass, false, -1)];
+        List<Node> headsetOff = [new("c1", "WH-1000XM4", BluetoothClass, true, -1), new("c1", "WH-1000XM4 Hands-Free AG", MediaClass, false, 80)];
+        List<Node> mouseWithKeys = [new("c2", "MX Master 3", BluetoothClass, false, 60), new("c2", "HID Keyboard Device", KeyboardClass, false, -1), new("c2", "HID-compliant mouse", MouseClass, false, -1)];
+        List<Node> other = [new("c3", "Pen", BluetoothClass, false, 50)];
         return (ParseShark([0x03, 0xB1, 0x40, 0x01, 0x4E], 5) is (78, false)    // real frame from this PC's receiver
              && ParseShark([0x03, 0xE5, 0x40, 0x03, 0x64], 5) is (100, true) // charging, at 100 %
              && ParseShark([0x03, 0xE5, 0x01, 0x00, 0x00], 5) is null        // another message type
              && ParseShark([0x03, 0xB1, 0x40, 0x01, 0x65], 5) is null        // 101 % is not a level
              && ParseShark([0x03, 0xB1, 0x40], 3) is null
-             && PickBluetooth(headset, DateTime.Now) is { Count: 1 } shown && shown["win:c1"] is { Name: "WH-1000XM4", Percent: 80 }
-             && PickBluetooth(headsetOff, DateTime.Now).Count == 0) ? 0 : 1;
+             && PickBluetooth(headset, DateTime.Now) is { Count: 1 } shown && shown["win:c1"] is { Name: "WH-1000XM4", Kind: "headset", Percent: 80 }
+             && PickBluetooth(headsetOff, DateTime.Now).Count == 0
+             && PickBluetooth(mouseWithKeys, DateTime.Now)["win:c2"] is { Kind: "mouse", Percent: 60 }
+             && PickBluetooth(other, DateTime.Now)["win:c3"] is { Kind: "bluetooth" }
+             && IsAulaReply(Convert.FromHexString("134A0100026401" + new string('0', 24) + "C5"), 20)   // real reply from this PC's Aula: 100 %, on battery
+             && !IsAulaReply(Convert.FromHexString("134A00" + new string('0', 32) + "5D"), 20)          // our own request echoed back
+             && !IsAulaReply(Convert.FromHexString("134A0100026401" + new string('0', 24) + "C6"), 20)  // bad checksum
+             && ParseLogiBattery(0x1004, [0x11, 0xFF, 5, 0x1D, 73, 0, 1]) is (73, true)    // 0x1004: 73 %, charging
+             && ParseLogiBattery(0x1004, [0x11, 0xFF, 5, 0x1D, 0, 4, 0]) is (50, false)    // level flag "good"
+             && ParseLogiBattery(0x1000, [0x11, 0xFF, 5, 0x0D, 40, 0, 4]) is (40, true)
+             && ParseLogiBattery(0x1001, [0x11, 0xFF, 5, 0x0D, 0x10, 0x68, 0x80]) is (100, true) // 4200 mV
+             && LogiVoltage(4200) == 100 && LogiVoltage(3400) == 0
+             && LogiKind(0) == "keyboard" && LogiKind(4) == "mouse" && LogiKind(8) == "headset" && LogiKind(1) == "device"
+             && IsLogiReply([0x11, 0xFF, 5, 0x1D, 1, 0, 0], [0x11, 0xFF, 5, 0x1D]) && !IsLogiReply([0x11, 0x01, 5, 0x1D, 1, 0, 0], [0x11, 0xFF, 5, 0x1D])
+             && RazerReq(0x1F, 0x80)[89] == 0x85 && RazerXor(RazerReq(0x3F, 0x84)) == RazerReq(0x3F, 0x84)[89]
+             && RazerPercent(255) == 100 && RazerPercent(128) == 50
+             && RazerKind("Razer BlackWidow V3") == "keyboard" && RazerKind("Razer Kraken") == "headset" && RazerKind("Razer DeathAdder") == "mouse"
+             && HidPercent(50, 0, 100) == 50 && HidPercent(200, 0, 255) == 78 && HidPercent(300, 0, 100) == 100 && HidPercent(0, 1, 5) == 0
+             && Marshal.SizeOf<HidpValueCaps>() == 72
+             && PathBase(@"\\?\hid#vid_046d&pid_c52b&mi_02&col02#8&1#{x}") == @"\\?\hid#vid_046d&pid_c52b&mi_02#8&1#{x}")
+            ? 0 : 1;
     }
 }
 
@@ -186,12 +254,12 @@ static class Native
         return size > 0 && CM_Get_DevNode_Property(dev, ref key, out _, buf, ref size, 0) == 0 ? buf : null;
     }
 
-    public static int InputLength(SafeFileHandle h)
+    public static HidpCaps Caps(SafeFileHandle h)
     {
-        if (!HidD_GetPreparsedData(h, out var pp)) return 0;
+        if (!HidD_GetPreparsedData(h, out var pp)) return default;
         HidP_GetCaps(pp, out var caps);
         HidD_FreePreparsedData(pp);
-        return caps.InputReportByteLength;
+        return caps;
     }
 
     static string[] Split(char[] multiSz) => new string(multiSz).Split('\0', StringSplitOptions.RemoveEmptyEntries);
@@ -204,8 +272,16 @@ static class Native
     [DllImport("cfgmgr32.dll", EntryPoint = "CM_Get_DevNode_PropertyW")] static extern int CM_Get_DevNode_Property(int dev, ref DevPropKey key, out int type, byte[]? buf, ref int size, int flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError = true)] public static extern bool ReadFile(SafeFileHandle h, byte[] buf, int len, out int read, IntPtr overlapped);
-    [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr pp);
-    [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool WriteFile(SafeFileHandle h, byte[] buf, int len, out int written, IntPtr overlapped);
+    [DllImport("kernel32.dll")] public static extern bool CancelIoEx(SafeFileHandle h, IntPtr overlapped);
+    [DllImport("hid.dll")] public static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr pp);
+    [DllImport("hid.dll")] public static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")] public static extern bool HidD_SetFeature(SafeFileHandle h, byte[] buf, int len);
+    [DllImport("hid.dll")] public static extern bool HidD_GetFeature(SafeFileHandle h, byte[] buf, int len);
+    [DllImport("hid.dll")] public static extern bool HidD_GetInputReport(SafeFileHandle h, byte[] buf, int len);
+    [DllImport("hid.dll")] public static extern bool HidD_GetProductString(SafeFileHandle h, byte[] buf, int len);
+    [DllImport("hid.dll")] public static extern int HidP_GetValueCaps(int type, [Out] HidpValueCaps[] caps, ref ushort len, IntPtr pp);
+    [DllImport("hid.dll")] public static extern int HidP_GetUsageValue(int type, ushort page, ushort link, ushort usage, out uint value, IntPtr pp, byte[] report, int len);
     [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr pp, out HidpCaps caps);
     [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr icon);
 }
