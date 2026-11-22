@@ -2,14 +2,14 @@
 
 See the battery level of your wireless mice, keyboards and headsets on the Windows taskbar.
 
-Each device gets its own tray icon: the device's shape with a battery bar under it. Hover an icon for the device name and exact %. No vendor software needed.
+Each device gets its own tray icon: the device's shape with a battery bar under or beside it. Hover an icon for the device name and exact %. No vendor software needed.
 
 ## What the icons mean
 
 | Icon | Meaning |
 |---|---|
-| mouse, keyboard or headset shape | which device it is (anything else shows a generic icon) |
-| bar under the shape | battery level: the fuller the bar, the more charge |
+| mouse, keyboard or headset shape | which device it is (anything else shows a USB plug) |
+| bar under or beside the shape | battery level: the fuller the bar, the more charge |
 | green / red / blue bar | normal / 20 % or less / charging |
 | gray icon | no recent reading: the device is asleep or off |
 | gray Bluetooth logo, no bar | no device is reporting battery right now |
@@ -30,15 +30,24 @@ Right-click any icon → **Exit** closes the app. On Windows 11 the icons pin th
 Not supported yet:
 - SteelSeries, Corsair, HyperX and other brands that use a different protocol for each model
 - older Logitech devices that only speak HID++ 1.0
-- game controllers, which get the generic icon
+- game controllers, which get the USB plug icon
 
 See [Adding a device](#adding-a-device).
 
 ## Install and run
 
+### Download (no .NET needed)
+
+1. Download `WirelessTaskBar.exe` from the [latest release](https://github.com/En1gM-a/WirelessTaskBar/releases/latest). It bundles everything it needs.
+2. Double-click it. The app isn't code-signed, so Windows may show *Windows protected your PC*: click **More info → Run anyway**.
+
+Your devices' icons appear on the taskbar within a few seconds. You need 64-bit Windows 10 or 11.
+
+### Build from source
+
 You need Windows 10 or 11; the steps below install everything else. Run the commands in **PowerShell**: press **Start**, type `PowerShell` and press Enter.
 
-### 1. Install the tools
+#### 1. Install the tools
 
 ```powershell
 winget install --id Microsoft.DotNet.SDK.10 -e --source winget
@@ -51,7 +60,7 @@ When they finish, **close PowerShell and open a new window**, so it finds `dotne
 
 If PowerShell says `winget` isn't recognised, install *App Installer* from the Microsoft Store and try again. You can also download the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) and [Git](https://git-scm.com/download/win) installers yourself.
 
-### 2. Get the code
+#### 2. Get the code
 
 ```powershell
 git clone https://github.com/En1gM-a/WirelessTaskBar.git
@@ -60,7 +69,7 @@ cd WirelessTaskBar
 
 Without Git: on this repo's GitHub page click **Code → Download ZIP** and extract it. Then, in PowerShell, `cd` into the extracted `WirelessTaskBar-main` folder.
 
-### 3. Build and run
+#### 3. Build and run
 
 ```powershell
 dotnet build -c Release
@@ -69,8 +78,10 @@ dotnet build -c Release
 
 Your devices' icons appear on the taskbar within a few seconds.
 
+### After installing
+
 - **Start with Windows:** press **Win + R**, type `shell:startup`, press Enter, and put a shortcut to `WirelessTaskBar.exe` in the folder that opens. Delete the shortcut to stop it.
-- **Updating:** exit the app (right-click an icon → **Exit**). Run `git pull` in the folder, or download the ZIP again, then repeat step 3. The app must be closed, because the running `.exe` locks the build output.
+- **Updating:** exit the app first (right-click an icon → **Exit**), because Windows locks a running `.exe`. Then either download the new `WirelessTaskBar.exe`, or, for a source build, run `git pull` (or download the ZIP again) and repeat step 3.
 
 ## Device not showing?
 

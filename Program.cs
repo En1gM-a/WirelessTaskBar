@@ -1,3 +1,4 @@
+using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32;
@@ -35,7 +36,7 @@ static partial class Program
 
     // What a Bluetooth device is, from the classes of its nodes, checked in this order (mice often add a keyboard node for their buttons).
     static readonly (Guid Class, string Kind)[] Kinds = [(AudioClass, "headset"), (MediaClass, "headset"), (MouseClass, "mouse"), (KeyboardClass, "keyboard")];
-    static readonly Dictionary<string, string> Glyphs = new() { ["device"] = "\uE772", ["mouse"] = "\uE962", ["keyboard"] = "\uE765", ["headset"] = "\uE95B", ["bluetooth"] = "\uE702" };
+    static readonly Dictionary<string, string> Glyphs = new() { ["device"] = "\uE88E", ["mouse"] = "\uE962", ["keyboard"] = "\uE765", ["headset"] = "\uE95B", ["bluetooth"] = "\uE702" };
     static readonly string IconFont = FontFamily.Families.Any(f => f.Name == "Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets"; // Windows 11 : 10
 
     [STAThread]
@@ -94,31 +95,46 @@ static partial class Program
             : (r.Kind, r.Percent, r.Charging ? Color.DodgerBlue : r.Percent <= 20 ? Color.Red : Color.LimeGreen,
                $"{r.Name}: {r.Percent}%" + (r.Charging ? ", charging" : ""));
 
-    // The device's glyph in the taskbar's text color, with a battery bar along the bottom (none when percent < 0). Sized for the current DPI.
+    // The device's glyph in the taskbar's text color, plus a battery bar (none when percent < 0). Like Windows' own tray icons, the glyph
+    // keeps the icon font's size and grid (16 px at 100 %), so its 1 px lines land on whole pixels instead of smearing gray.
     static void Draw(NotifyIcon icon, string glyph, int percent, Color bar, bool light)
     {
         var s = SystemInformation.SmallIconSize.Width;
-        var h = Math.Max(2, s / 8);
+        var h = Math.Max(2, s / 8); // bar thickness, and the gap between bar and glyph
+        using var family = new FontFamily(IconFont);
+        using var path = new GraphicsPath();
+        path.AddString(glyph, family, 0, s, PointF.Empty, StringFormat.GenericTypographic);
+        var (under, dx, dy) = percent >= 0 ? Fit(path.GetBounds(), s, h) : (false, 0, 0);
         using var bmp = new Bitmap(s, s);
         using (var g = Graphics.FromImage(bmp))
-        using (var font = new Font(IconFont, s - h, GraphicsUnit.Pixel)) // 14 px at 100 % keeps the glyph's 1 px strokes crisp
         using (var ink = new SolidBrush(bar == Color.Gray ? Color.Gray : light ? Color.Black : Color.White))
         using (var track = new SolidBrush(Color.FromArgb(120, Color.Gray)))
         using (var fill = new SolidBrush(bar))
-        using (var center = new StringFormat(StringFormatFlags.NoClip) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
         {
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-            g.DrawString(glyph, font, ink, new RectangleF(0, 0, s, s - h), center);
+            g.PixelOffsetMode = PixelOffsetMode.Half; // whole-number coordinates are pixel edges, so the font's grid meets the pixel grid
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TranslateTransform(dx, dy);
+            g.FillPath(ink, path);
+            g.ResetTransform();
+            g.SmoothingMode = SmoothingMode.None;
             if (percent >= 0)
             {
-                g.FillRectangle(track, 0, s - h, s, h);
-                g.FillRectangle(fill, 0, s - h, Math.Max(1, s * percent / 100), h);
+                var level = Math.Max(1, s * percent / 100);
+                if (under) { g.FillRectangle(track, 0, s - h, s, h); g.FillRectangle(fill, 0, s - h, level, h); }
+                else { g.FillRectangle(track, s - h, 0, h, s); g.FillRectangle(fill, s - h, s - level, h, level); }
             }
         }
         var old = icon.Icon;
         icon.Icon = Icon.FromHandle(bmp.GetHicon());
         if (old != null) Native.DestroyIcon(old.Handle); // FromHandle icons never free their HICON
     }
+
+    // Where the bar goes: under a low glyph (keyboard), else beside it (mouse, headset, which fill the full height). The glyph moves
+    // by whole pixels only, so it stays sharp, and just far enough to leave a bar-wide gap.
+    static (bool Under, int Dx, int Dy) Fit(RectangleF glyph, int s, int h) =>
+        glyph.Height <= s - 2 * h
+            ? (true, 0, Math.Min(0, (int)Math.Floor(s - 2 * h - glyph.Bottom)))
+            : (false, Math.Min(0, (int)Math.Floor(s - 2 * h - glyph.Right)), 0);
 
     // Windows 11 tucks new tray icons behind the ^ arrow. Flip ours to "show on taskbar": the same switch as
     // Settings > Personalization > Taskbar > Other system tray icons. Windows 10 has no such key, so this does nothing there.
@@ -224,6 +240,7 @@ static partial class Program
              && RazerKind("Razer BlackWidow V3") == "keyboard" && RazerKind("Razer Kraken") == "headset" && RazerKind("Razer DeathAdder") == "mouse"
              && HidPercent(50, 0, 100) == 50 && HidPercent(200, 0, 255) == 78 && HidPercent(300, 0, 100) == 100 && HidPercent(0, 1, 5) == 0
              && Marshal.SizeOf<HidpValueCaps>() == 72
+             && Fit(new(2, 0, 11, 16), 16, 2) == (false, -1, 0) && Fit(new(0, 2, 16, 11), 16, 2) == (true, 0, -1) // mouse, keyboard glyph bounds at 16 px
              && PathBase(@"\\?\hid#vid_046d&pid_c52b&mi_02&col02#8&1#{x}") == @"\\?\hid#vid_046d&pid_c52b&mi_02#8&1#{x}")
             ? 0 : 1;
     }
