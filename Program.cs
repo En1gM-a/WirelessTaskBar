@@ -17,6 +17,7 @@ static partial class Program
 
     static readonly Dictionary<string, Reading> Readings = new(); // written by the reader thread and the poll; lock before use
     static readonly Dictionary<string, (NotifyIcon Icon, string Shown)> Icons = new();
+    static int pinTicks; // ticks left to run PinToTaskbar after a new icon appears; it reads every tray app's settings key, too slow for every tick
 
     static void Report(string key, string name, string kind, int percent, bool charging, TimeSpan fresh)
     {
@@ -80,12 +81,13 @@ static partial class Program
             Icons.TryGetValue(key, out var shown);
             if (shown.Shown == look) continue;
             var icon = shown.Icon ?? new NotifyIcon { ContextMenuStrip = menu };
+            if (shown.Icon == null) pinTicks = 15; // Windows may file a new icon's settings key a moment after it first shows, so keep trying for 30 s
             Draw(icon, Glyphs[kind], percent, bar, light);
             icon.Text = tip.Length > 127 ? tip[..127] : tip; // shell limit
             icon.Visible = true;
             Icons[key] = (icon, look);
         }
-        PinToTaskbar();
+        if (pinTicks > 0) { pinTicks--; PinToTaskbar(); }
     }
 
     // Bar: red at 20 % or less, blue while charging; the whole icon turns gray once the reading is older than its Fresh time.
@@ -175,7 +177,8 @@ static partial class Program
 
     static void PollWindowsBattery()
     {
-        if (Native.DeviceIds() is not { } ids) return; // device list changed mid-read; the next poll retries
+        // Only Bluetooth devices carry this battery value: with none present, skip reading every device on the PC.
+        if ((Native.DeviceIds(BluetoothClass) is [] ? [] : Native.DeviceIds()) is not { } ids) return; // null: list changed mid-read; the next poll retries
         var nodes = new List<Node>();
         foreach (var id in ids)
         {
@@ -256,11 +259,13 @@ static class Native
         return CM_Get_Device_Interface_List(ref hid, null, buf, len, 0) == 0 ? Split(buf) : [];
     }
 
-    public static string[]? DeviceIds()
+    // Present devices, or only those of one setup class.
+    public static string[]? DeviceIds(Guid? cls = null)
     {
-        if (CM_Get_Device_ID_List_Size(out var len, null, 0x100) != 0) return null; // CM_GETIDLIST_FILTER_PRESENT
+        var (filter, flags) = cls is { } c ? (c.ToString("B"), 0x300) : (null, 0x100); // CM_GETIDLIST_FILTER_PRESENT, | _CLASS
+        if (CM_Get_Device_ID_List_Size(out var len, filter, flags) != 0) return null;
         var buf = new char[len];
-        return CM_Get_Device_ID_List(null, buf, len, 0x100) == 0 ? Split(buf) : null;
+        return CM_Get_Device_ID_List(filter, buf, len, flags) == 0 ? Split(buf) : null;
     }
 
     public static byte[]? Prop(int dev, DevPropKey key)
