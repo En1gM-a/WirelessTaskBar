@@ -88,7 +88,7 @@ Your devices' icons appear on the taskbar within a few seconds.
 - Check that it's in [Supported devices](#supported-devices) and switched on.
 - **2.4 GHz devices:** the receiver must be plugged in and the device set to 2.4 GHz mode, not Bluetooth or cable.
 - **Bluetooth devices:** if *Settings → Bluetooth & devices* shows no battery % for it, the device doesn't report one, so the app can't show one either.
-- **Aula keyboards** only answer while awake. After a keyboard has slept for a while the app asks less often, at most once an hour. To see it straight away, press a key and restart the app.
+- **Aula keyboards** only answer while awake. The app asks every minute, so a keyboard you switch on or wake with a key press shows within a minute.
 
 ## Self-test
 
@@ -116,7 +116,6 @@ Plain Win32 calls (`cfgmgr32`, `hid`, `kernel32`, `user32`) and no NuGet package
 - **Attack Shark:** the receiver sends `03 xx 40 <state> <level>` about every 2 s (state `03` = charging). The app only listens.
 - **Aula:** once a minute the app sends the vendor apps' battery request, `13 4A …` plus a checksum, and reads the % from byte 5 and charging from byte 6 of the reply.
   - A dozing keyboard ignores the first request, so the app resends it up to 3 times.
-  - If the keyboard stops answering, the app waits 5, then 10, 20, 40 and 60 minutes between tries, so it doesn't keep waking it.
 - **Logitech:** HID++ 2.0 on the long HID++ channel. The app looks up the battery feature (`0x1004`, `0x1000` or `0x1001`) and the name/type feature (`0x0005`). Devices behind a receiver are asked in slots 1–6.
 - **Razer:** a 91-byte feature report with command class `07`: `80` for battery, `84` for charging. The app tries the transaction IDs that different models answer to.
 - **Standard HID:** any other USB device whose report descriptor declares *Battery Strength* (usage page `0x06`, usage `0x20`).

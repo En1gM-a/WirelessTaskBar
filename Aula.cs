@@ -7,14 +7,10 @@ static partial class Program
 {
     static void ReadAula()
     {
-        var misses = 0;
         while (true)
         {
-            var answered = PollAula();
-            if (answered == null) { Forget("aula"); misses = 0; } // no receiver plugged in
-            else misses = answered.Value ? 0 : misses + 1;
-            // Every request wakes the keyboard, so back off while it stays silent: 1 min, then 5, 10, 20, 40, 60 min.
-            Thread.Sleep(TimeSpan.FromMinutes(misses < 3 ? 1 : Math.Min(5 << Math.Min(misses - 3, 4), 60)));
+            if (PollAula() == null) Forget("aula"); // no receiver plugged in
+            Thread.Sleep(60000); // no back-off: a keyboard switched on or woken later has to show within a minute
         }
     }
 
